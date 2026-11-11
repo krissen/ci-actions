@@ -2,25 +2,21 @@ name: debug
 on: pull_request
 jobs:
   probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
     steps:
       - run: |
-          set -x
-          cat /etc/apt/apt-mirrors.txt || true
-          cat /etc/apt/sources.list.d/*.sources || true
-          apt-config dump | grep -iE 'variant|architect' || true
-          dpkg --print-architecture; dpkg --print-foreign-architectures || true
-          apt-cache policy poppler-utils | head -20
-      - name: azure amd64v3 pool
-        run: curl -sS -m 20 -o /dev/null -w '%{http_code} %{time_total}\n' http://azure.archive.ubuntu.com/ubuntu/dists/resolute/main/binary-amd64v3/Release || true
-      - name: archive amd64v3 pool
-        run: curl -sS -m 20 -o /dev/null -w '%{http_code} %{time_total}\n' http://archive.ubuntu.com/ubuntu/dists/resolute/main/binary-amd64v3/Release || true
-      - name: download via archive.ubuntu.com
-        run: |
-          sudo sed -i -E 's#mirror\+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#; s#https?://azure\.archive\.ubuntu\.com/ubuntu/?#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list.d/*.sources
-          timeout 120 sudo apt-get update -q | tail -3
-          mkdir -p /tmp/d/partial; time timeout 120 sudo apt-get -o Dir::Cache::archives=/tmp/d install --download-only -y -q --no-install-recommends poppler-utils | tail -5
-      - name: download with amd64 variant forced
-        run: |
-          mkdir -p /tmp/e/partial; time timeout 90 sudo apt-get -o APT::Architecture-Variants=amd64 -o Dir::Cache::archives=/tmp/e install --download-only -y -q --no-install-recommends ffmpeg | tail -5 || true
+          . /etc/os-release; echo "$PRETTY_NAME $ImageVersion"
+          cat /etc/resolv.conf | grep -v '^#'
+          for h in archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com github.com deb.debian.org; do
+            printf '%-28s getent=%s\n' "$h" "$(getent hosts $h | awk '{print $1}' | head -1)"
+          done
+          dig +short +time=3 archive.ubuntu.com @8.8.8.8 || true
+          resolvectl status 2>/dev/null | grep -E 'DNS Server|Current' | head -4 || true
+      - run: |
+          mkdir -p /tmp/d/partial
+          time timeout 120 sudo apt-get -o Dir::Cache::archives=/tmp/d install --download-only -y -q --no-install-recommends poppler-utils 2>&1 | grep -E 'Get:|Err|Ign|Fetched|E:' | head
