@@ -23,11 +23,17 @@ inputs:
   download-timeout:
     description: Seconds allowed for each download attempt on a cache miss.
     required: false
-    default: "240"
+    default: "180"
   update-timeout:
     description: Seconds allowed for apt-get update on a cache miss.
     required: false
-    default: "120"
+    default: "90"
+  fallback-mirror:
+    description: >-
+      Ubuntu mirror to switch to when the runner's default mirror fails or
+      hangs on a cache miss. Empty disables the fallback.
+    required: false
+    default: "http://archive.ubuntu.com/ubuntu"
 
 outputs:
   cache-hit:
@@ -73,6 +79,7 @@ runs:
         REQUIRED: ${{ inputs.required }}
         DOWNLOAD_TIMEOUT: ${{ inputs.download-timeout }}
         UPDATE_TIMEOUT: ${{ inputs.update-timeout }}
+        FALLBACK_MIRROR: ${{ inputs.fallback-mirror }}
         HIT: ${{ steps.restore.outputs.cache-hit }}
       run: |
         set -uo pipefail
@@ -89,15 +96,25 @@ runs:
         }
         mkdir -p "$DEBS/partial"
         if ! compgen -G "$DEBS/*.deb" >/dev/null; then
-          opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          opts=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
                 -o "Dir::Cache::archives=$DEBS")
-          fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -qq --no-install-recommends "${pkgs[@]}"; }
-          # The runner's package lists are usually fresh enough; refresh them
-          # only when the download from them fails.
-          if ! fetch; then
-            timeout "$UPDATE_TIMEOUT" sudo apt-get -o Acquire::Retries=3 update -qq && fetch \
-              || fail "download of ${LIST} failed or timed out"
+          fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -q --no-install-recommends "${pkgs[@]}"; }
+          update() { timeout "$UPDATE_TIMEOUT" sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -q; }
+          # 1. The runner's package lists are usually fresh enough.
+          fetch; rc=$?
+          # 2. Stale lists fail fast: refresh them and try again. A timeout
+          #    (124) means the mirror itself hangs, so skip this step.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+            echo "::group::apt-get update"; update && fetch; rc=$?; echo "::endgroup::"
           fi
+          # 3. Switch from the runner's default mirror to the fallback.
+          if [ "$rc" -ne 0 ] && [ -n "$FALLBACK_MIRROR" ]; then
+            echo "::warning title=apt-cached::default mirror failed (exit $rc); trying $FALLBACK_MIRROR"
+            sudo find /etc/apt/sources.list /etc/apt/sources.list.d -type f \( -name '*.list' -o -name '*.sources' \) \
+              -exec sed -i -E "s#https?://[a-z0-9.-]*archive\.ubuntu\.com/ubuntu/?#${FALLBACK_MIRROR}#g" {} +
+            update && fetch; rc=$?
+          fi
+          [ "$rc" -eq 0 ] || fail "download of ${LIST} failed or timed out (exit $rc)"
           sudo rm -rf "$DEBS/partial" "$DEBS/lock"
           sudo chown -R "$USER" "$DEBS"
         fi
