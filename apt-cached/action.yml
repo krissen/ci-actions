@@ -93,13 +93,17 @@ runs:
           fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -q --no-install-recommends "${pkgs[@]}"; }
           update() { timeout "$UPDATE_TIMEOUT" sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -q; }
           # A mirror whose name does not resolve makes apt retry until the
-          # timeout (seen on 2026-11-11 for every *.ubuntu.com host): check
-          # the names first and fail in seconds instead.
+          # timeout (seen on 2026-11-11 for every *.ubuntu.com host, where a
+          # lookup could also take minutes): check the names first, with a
+          # bound per lookup, and fail in seconds instead.
           hosts=$( { cat /etc/apt/apt-mirrors.txt 2>/dev/null
                      grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/* ; } \
                    | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | sort -u)
           resolvable=""
-          for h in $hosts; do getent hosts "$h" >/dev/null && resolvable="$resolvable $h"; done
+          for h in $hosts; do
+            if timeout 5 getent hosts "$h" >/dev/null; then resolvable="$resolvable $h"; echo "resolves: $h"
+            else echo "does not resolve within 5 s: $h"; fi
+          done
           if [ -n "$hosts" ] && [ -z "$resolvable" ]; then
             fail "no apt mirror resolves ($(echo $hosts)); DNS outage on the runner"
           fi
