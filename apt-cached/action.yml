@@ -96,9 +96,11 @@ runs:
           # timeout (seen on 2026-11-11 for every *.ubuntu.com host, where a
           # lookup could also take minutes): check the names first, with a
           # bound per lookup, and fail in seconds instead.
+          # Only the Ubuntu archive counts: packages.microsoft.com and other
+          # third-party sources resolve on their own and serve none of this.
           hosts=$( { cat /etc/apt/apt-mirrors.txt 2>/dev/null
-                     grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/* ; } \
-                   | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | sort -u)
+                     grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources ; } \
+                   | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | grep -E 'ubuntu\.com$' | sort -u)
           resolvable=""
           for h in $hosts; do
             if timeout 5 getent hosts "$h" >/dev/null; then resolvable="$resolvable $h"; echo "resolves: $h"
