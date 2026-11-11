@@ -1,0 +1,122 @@
+name: apt-cached
+description: >-
+  Install apt packages from a cache of their .deb files, keyed on the runner
+  image and the package list. A hit installs offline with dpkg; only a miss
+  goes to the apt mirrors, with a timeout on every call.
+
+inputs:
+  packages:
+    description: Space- or newline-separated package names.
+    required: true
+  commands:
+    description: >-
+      Commands that must be on PATH afterwards (space-separated). Checked on
+      every run; a missing one counts as a failed install.
+    required: false
+    default: ""
+  required:
+    description: >-
+      "true": a failed install fails the step. "false": it becomes a warning
+      and the step succeeds, for jobs whose tests skip without the tools.
+    required: false
+    default: "true"
+  download-timeout:
+    description: Seconds allowed for each download attempt on a cache miss.
+    required: false
+    default: "240"
+  update-timeout:
+    description: Seconds allowed for apt-get update on a cache miss.
+    required: false
+    default: "120"
+
+outputs:
+  cache-hit:
+    description: '"true" when the packages came from the cache.'
+    value: ${{ steps.restore.outputs.cache-hit == 'true' }}
+  installed:
+    description: '"true" when every package and command is in place.'
+    value: ${{ steps.install.outputs.installed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Cache key
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        list=$(tr -s ' \n\t' '\n' <<< "$PACKAGES" | sed '/^$/d' | sort -u | tr '\n' ' ')
+        hash=$(printf '%s' "$list" | sha256sum | cut -c1-16)
+        {
+          echo "key=apt-cached-${ImageOS:-unknown}-${ImageVersion:-unknown}-$(uname -m)-${hash}"
+          echo "dir=${RUNNER_TEMP}/apt-cached-${hash}"
+          echo "list=${list}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore .deb cache
+      id: restore
+      continue-on-error: true
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
+
+    - name: Install
+      id: install
+      shell: bash
+      env:
+        DEBS: ${{ steps.key.outputs.dir }}
+        LIST: ${{ steps.key.outputs.list }}
+        COMMANDS: ${{ inputs.commands }}
+        REQUIRED: ${{ inputs.required }}
+        DOWNLOAD_TIMEOUT: ${{ inputs.download-timeout }}
+        UPDATE_TIMEOUT: ${{ inputs.update-timeout }}
+        HIT: ${{ steps.restore.outputs.cache-hit }}
+      run: |
+        set -uo pipefail
+        read -ra pkgs <<< "$LIST"
+        fail() {
+          echo "installed=false" >> "$GITHUB_OUTPUT"
+          rm -rf "$DEBS"   # never save an incomplete set
+          if [ "$REQUIRED" = "true" ]; then
+            echo "::error title=apt-cached::$1"
+            exit 1
+          fi
+          echo "::warning title=apt-cached::$1"
+          exit 0
+        }
+        mkdir -p "$DEBS/partial"
+        if ! compgen -G "$DEBS/*.deb" >/dev/null; then
+          opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+                -o "Dir::Cache::archives=$DEBS")
+          fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -qq --no-install-recommends "${pkgs[@]}"; }
+          # The runner's package lists are usually fresh enough; refresh them
+          # only when the download from them fails.
+          if ! fetch; then
+            timeout "$UPDATE_TIMEOUT" sudo apt-get -o Acquire::Retries=3 update -qq && fetch \
+              || fail "download of ${LIST} failed or timed out"
+          fi
+          sudo rm -rf "$DEBS/partial" "$DEBS/lock"
+          sudo chown -R "$USER" "$DEBS"
+        fi
+        if compgen -G "$DEBS/*.deb" >/dev/null; then
+          sudo dpkg -i "$DEBS"/*.deb >/dev/null || fail "dpkg -i of the cached packages failed"
+        fi
+        for p in "${pkgs[@]}"; do
+          dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" \
+            || fail "package $p is not installed"
+        done
+        for c in $COMMANDS; do
+          command -v "$c" >/dev/null || fail "command $c is not on PATH"
+        done
+        echo "installed=true" >> "$GITHUB_OUTPUT"
+
+    - name: Save .deb cache
+      if: steps.restore.outputs.cache-hit != 'true' && steps.install.outputs.installed == 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
