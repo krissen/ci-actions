@@ -12,8 +12,11 @@ the apt mirrors on every run. The mirrors fail and hang: an uncached
   architecture and the sorted package list. A new runner image is a miss.
 - On a hit the packages are installed with `dpkg -i`, without the network.
 - On a miss the download runs against the runner's existing package lists
-  first. `apt-get update` runs only if that download fails. Each apt call
-  has its own timeout.
+  first. `apt-get update` runs only if that download fails fast; a timeout
+  means the mirror hangs, and an update would hang too. Each apt call has its
+  own timeout.
+- If none of the configured mirror hosts resolves, the action fails (or
+  warns) at once instead of letting apt retry until its timeout.
 - An incomplete set of packages is never saved to the cache.
 
 ```yaml
@@ -30,8 +33,8 @@ the apt mirrors on every run. The mirrors fail and hang: an uncached
 | `packages` | — | space- or newline-separated |
 | `commands` | `""` | must be on `PATH` afterwards |
 | `required` | `"true"` | `"false"` turns a failed install into a warning |
-| `download-timeout` | `240` | seconds per download attempt |
-| `update-timeout` | `120` | seconds for `apt-get update` |
+| `download-timeout` | `180` | seconds per download attempt |
+| `update-timeout` | `90` | seconds for `apt-get update` |
 
 Outputs: `cache-hit`, `installed`.
 

@@ -23,12 +23,11 @@ inputs:
   download-timeout:
     description: Seconds allowed for each download attempt on a cache miss.
     required: false
-    default: "240"
+    default: "180"
   update-timeout:
     description: Seconds allowed for apt-get update on a cache miss.
     required: false
-    default: "120"
-
+    default: "90"
 outputs:
   cache-hit:
     description: '"true" when the packages came from the cache.'
@@ -75,7 +74,7 @@ runs:
         UPDATE_TIMEOUT: ${{ inputs.update-timeout }}
         HIT: ${{ steps.restore.outputs.cache-hit }}
       run: |
-        set -uo pipefail
+        set +e -uo pipefail   # exit codes are handled below
         read -ra pkgs <<< "$LIST"
         fail() {
           echo "installed=false" >> "$GITHUB_OUTPUT"
@@ -89,15 +88,35 @@ runs:
         }
         mkdir -p "$DEBS/partial"
         if ! compgen -G "$DEBS/*.deb" >/dev/null; then
-          opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          opts=(-o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
                 -o "Dir::Cache::archives=$DEBS")
-          fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -qq --no-install-recommends "${pkgs[@]}"; }
-          # The runner's package lists are usually fresh enough; refresh them
-          # only when the download from them fails.
-          if ! fetch; then
-            timeout "$UPDATE_TIMEOUT" sudo apt-get -o Acquire::Retries=3 update -qq && fetch \
-              || fail "download of ${LIST} failed or timed out"
+          fetch() { timeout "$DOWNLOAD_TIMEOUT" sudo apt-get "${opts[@]}" install --download-only -y -q --no-install-recommends "${pkgs[@]}"; }
+          update() { timeout "$UPDATE_TIMEOUT" sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -q; }
+          # A mirror whose name does not resolve makes apt retry until the
+          # timeout (seen on 2026-11-11 for every *.ubuntu.com host, where a
+          # lookup could also take minutes): check the names first, with a
+          # bound per lookup, and fail in seconds instead.
+          # Only the Ubuntu archive counts: packages.microsoft.com and other
+          # third-party sources resolve on their own and serve none of this.
+          hosts=$( { cat /etc/apt/apt-mirrors.txt 2>/dev/null
+                     grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources ; } \
+                   | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | grep -E 'ubuntu\.com$' | sort -u)
+          resolvable=""
+          for h in $hosts; do
+            if timeout 5 getent hosts "$h" >/dev/null; then resolvable="$resolvable $h"; echo "resolves: $h"
+            else echo "does not resolve within 5 s: $h"; fi
+          done
+          if [ -n "$hosts" ] && [ -z "$resolvable" ]; then
+            fail "no apt mirror resolves ($(echo $hosts)); DNS outage on the runner"
           fi
+          # 1. The runner's package lists are usually fresh enough.
+          fetch; rc=$?
+          # 2. Stale lists fail fast: refresh them and try again. A timeout
+          #    (124) means the mirror hangs, and an update would hang too.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+            echo "::group::apt-get update"; update && fetch; rc=$?; echo "::endgroup::"
+          fi
+          [ "$rc" -eq 0 ] || fail "download of ${LIST} failed or timed out (exit $rc)"
           sudo rm -rf "$DEBS/partial" "$DEBS/lock"
           sudo chown -R "$USER" "$DEBS"
         fi
