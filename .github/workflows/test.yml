@@ -1,0 +1,56 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: raven-actions/actionlint@v2
+
+  # Two runs in a row: the first one may miss and fill the cache, the
+  # second one must hit it and install with dpkg alone.
+  apt-cached:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - id: first
+        uses: ./apt-cached
+        with:
+          packages: poppler-utils
+          commands: pdftotext
+      - run: sudo dpkg -r poppler-utils >/dev/null && ! command -v pdftotext
+      - id: second
+        uses: ./apt-cached
+        with:
+          packages: poppler-utils
+          commands: pdftotext
+      - name: Second install came from the cache
+        env:
+          FIRST: ${{ steps.first.outputs.cache-hit }}
+          INSTALLED: ${{ steps.second.outputs.installed }}
+        run: |
+          echo "first run cache-hit=$FIRST"
+          test "$INSTALLED" = "true"
+          pdftotext -v
+
+  missing-not-required:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - id: soft
+        uses: ./apt-cached
+        with:
+          packages: no-such-package-apt-cached-test
+          required: "false"
+      - run: test "${{ steps.soft.outputs.installed }}" = "false"
