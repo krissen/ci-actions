@@ -15,8 +15,7 @@ the apt mirrors on every run. The mirrors fail and hang: an uncached
   first. `apt-get update` runs only if that download fails fast; a timeout
   means the mirror hangs, and an update would hang too. Each apt call has its
   own timeout.
-- If none of the configured mirror hosts resolves, the action fails (or
-  warns) at once instead of letting apt retry until its timeout.
+- If a download is needed and none of the Ubuntu archive hosts resolves, the action fails (or warns) at once instead of letting apt retry until its timeout.
 - An incomplete set of packages is never saved to the cache.
 
 ```yaml
