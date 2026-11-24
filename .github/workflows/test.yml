@@ -43,6 +43,19 @@ jobs:
           test "$INSTALLED" = "true"
           pdftotext -v
 
+  # Packages already on the image need no mirror: the DNS check is skipped.
+  already-installed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - id: present
+        uses: ./apt-cached
+        with:
+          packages: bash coreutils
+          commands: bash
+      - run: test "${{ steps.present.outputs.installed }}" = "true"
+
   missing-not-required:
     runs-on: ubuntu-latest
     timeout-minutes: 5

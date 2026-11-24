@@ -98,16 +98,22 @@ runs:
           # bound per lookup, and fail in seconds instead.
           # Only the Ubuntu archive counts: packages.microsoft.com and other
           # third-party sources resolve on their own and serve none of this.
-          hosts=$( { cat /etc/apt/apt-mirrors.txt 2>/dev/null
-                     grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources ; } \
-                   | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | grep -E 'ubuntu\.com$' | sort -u)
-          resolvable=""
-          for h in $hosts; do
-            if timeout 5 getent hosts "$h" >/dev/null; then resolvable="$resolvable $h"; echo "resolves: $h"
-            else echo "does not resolve within 5 s: $h"; fi
-          done
-          if [ -n "$hosts" ] && [ -z "$resolvable" ]; then
-            fail "no apt mirror resolves ($(echo $hosts)); DNS outage on the runner"
+          # The check runs only when apt would download something: a dry run
+          # from the local lists needs no mirror, and packages that are
+          # already installed must not fail on an outage.
+          sim=$(apt-get "${opts[@]}" -s -q install --no-install-recommends "${pkgs[@]}" 2>/dev/null); simrc=$?
+          if [ "$simrc" -ne 0 ] || grep -q '^Inst ' <<< "$sim"; then
+            hosts=$( { cat /etc/apt/apt-mirrors.txt 2>/dev/null
+                       grep -hsE '^(URIs:|deb )' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources ; } \
+                     | grep -oE 'https?://[^/ ]+' | sed -E 's#https?://##' | grep -E 'ubuntu\.com$' | sort -u)
+            resolvable=""
+            for h in $hosts; do
+              if timeout 5 getent hosts "$h" >/dev/null; then resolvable="$resolvable $h"; echo "resolves: $h"
+              else echo "does not resolve within 5 s: $h"; fi
+            done
+            if [ -n "$hosts" ] && [ -z "$resolvable" ]; then
+              fail "no apt mirror resolves ($(echo $hosts)); DNS outage on the runner"
+            fi
           fi
           # 1. The runner's package lists are usually fresh enough.
           fetch; rc=$?
